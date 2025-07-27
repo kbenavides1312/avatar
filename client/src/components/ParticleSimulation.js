@@ -7,7 +7,8 @@ const ParticleSimulation = () => {
   const [isConnected, setIsConnected] = useState(false);
   const [simulationRunning, setSimulationRunning] = useState(false);
   const [particles, setParticles] = useState([]);
-  const [rectData, setRectData] = useState({ x: 600, y: 200, width: 20, height: 80 });
+  const [clientRectangles, setClientRectangles] = useState({});
+  const [myClientId, setMyClientId] = useState(null);
   const socketRef = useRef(null);
   const animationFrameRef = useRef(null);
 
@@ -31,9 +32,14 @@ const ParticleSimulation = () => {
       setIsConnected(false);
     });
 
+    socketRef.current.on('connected', (data) => {
+      setMyClientId(data.client_id);
+      console.log('My client ID:', data.client_id);
+    });
+
     socketRef.current.on('simulation_data', (data) => {
       setParticles(data.positions || []);
-      setRectData(data.rect_data || { x: 600, y: 200, width: 20, height: 80 });
+      setClientRectangles(data.client_rectangles || {});
     });
 
     return () => {
@@ -59,9 +65,20 @@ const ParticleSimulation = () => {
       ctx.fill();
     });
 
-    // Draw rectangle
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'; // Black with 50% transparency
-    ctx.fillRect(rectData.x, rectData.y, rectData.width, rectData.height);
+    // Draw all rectangles
+    Object.entries(clientRectangles).forEach(([clientId, rectData]) => {
+      const isMyRectangle = clientId === myClientId;
+      
+      if (isMyRectangle) {
+        // My rectangle - black with 50% transparency
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.fillRect(rectData[0], rectData[1], rectData[2], rectData[3]);
+      } else {
+        // Other users' rectangles - red with 30% transparency
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+        ctx.fillRect(rectData[0], rectData[1], rectData[2], rectData[3]);
+      }
+    });
 
     // Draw connection status
     ctx.fillStyle = isConnected ? 'green' : 'red';
@@ -69,7 +86,7 @@ const ParticleSimulation = () => {
     ctx.fillStyle = 'black';
     ctx.font = '12px Arial';
     ctx.fillText(isConnected ? 'Connected' : 'Disconnected', 25, 20);
-  }, [particles, rectData, isConnected]);
+  }, [particles, clientRectangles, myClientId, isConnected]);
 
   // Animation loop
   useEffect(() => {
@@ -92,24 +109,25 @@ const ParticleSimulation = () => {
   // Mouse event handler for clicking to move rectangle
   const handleCanvasClick = useCallback((e) => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !myClientId) return;
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    // Move rectangle to clicked position (center it on the click)
-    const newX = Math.max(0, Math.min(WIDTH - rectData.width, x - rectData.width / 2));
-    const newY = Math.max(0, Math.min(HEIGHT - rectData.height, y - rectData.height / 2));
+    // Get my rectangle data
+    const myRectData = clientRectangles[myClientId];
+    if (!myRectData) return;
 
-    const newRectData = { ...rectData, x: newX, y: newY };
-    setRectData(newRectData);
+    // Move my rectangle to clicked position (center it on the click)
+    const newX = Math.max(0, Math.min(WIDTH - myRectData[2], x - myRectData[2] / 2));
+    const newY = Math.max(0, Math.min(HEIGHT - myRectData[3], y - myRectData[3] / 2));
 
     // Send new position to server
     if (socketRef.current && isConnected) {
-      socketRef.current.emit('update_rect', newRectData);
+      socketRef.current.emit('update_rect', { x: newX, y: newY });
     }
-  }, [rectData, isConnected]);
+  }, [clientRectangles, myClientId, isConnected]);
 
   // Control functions
   const startSimulation = () => {
@@ -184,7 +202,10 @@ const ParticleSimulation = () => {
           <strong>Status:</strong> {simulationRunning ? 'Running' : 'Stopped'}
         </div>
         <div className="info-item">
-          <strong>Rectangle Position:</strong> ({Math.round(rectData.x)}, {Math.round(rectData.y)})
+          <strong>Connected Users:</strong> {Object.keys(clientRectangles).length}
+        </div>
+        <div className="info-item">
+          <strong>My Rectangle:</strong> {myClientId ? 'Active' : 'Waiting...'}
         </div>
       </div>
     </div>

@@ -32,12 +32,13 @@ positions[:, 1] = np.random.uniform(HEIGHT // 2, HEIGHT - 50, NUM_PARTICLES)
 velocities = np.zeros((NUM_PARTICLES, 2), dtype=np.float32)
 
 circle_center = [0, 0]
-rect_data = np.array([WIDTH//2 - rect_width//2, HEIGHT//2 - rect_height//2, rect_width, rect_height], dtype=np.float32)
+
+# Dictionary to store each client's rectangle data
+client_rectangles = {}
 
 # CUDA device arrays
 d_pos = cuda.to_device(positions)
 d_vel = cuda.to_device(velocities)
-d_rect = cuda.to_device(rect_data)
 d_target = cuda.to_device(np.array([0.0, 0.0], dtype=np.float32))
 d_attract = cuda.to_device(np.array([1], dtype=np.float32))  # Start with attraction enabled
 
@@ -47,7 +48,7 @@ simulation_running = True
 connected_clients = set()
 
 @cuda.jit
-def update(pos, vel, dt, gravity, damping, radius, width, height, target, attract, rect, pull_strength):
+def update(pos, vel, dt, gravity, damping, radius, width, height, target, attract, rects, num_rects, pull_strength):
     i = cuda.grid(1)
     if i >= pos.shape[0]:
         return
@@ -55,58 +56,59 @@ def update(pos, vel, dt, gravity, damping, radius, width, height, target, attrac
     # Gravity pulls down (y increases downward)
     vel[i, 1] += gravity * dt
 
-    # If attract flag set, apply pulling force towards target
+    # If attract flag set, apply pulling force towards all rectangles
     if attract[0] == 1:
-        rect_x = rect[0]
-        rect_y = rect[1]
-        rect_w = rect[2]
-        rect_h = rect[3]
+        for rect_idx in range(num_rects):
+            rect_x = rects[rect_idx, 0]
+            rect_y = rects[rect_idx, 1]
+            rect_w = rects[rect_idx, 2]
+            rect_h = rects[rect_idx, 3]
 
-        # rect power
-        inside_rect = rect_x <= pos[i, 0] <= rect_x + rect_w and rect_y <= pos[i, 1] <= rect_y + rect_h
-        if inside_rect:
-            force_x = pull_strength[0]
-            force_y = pull_strength[1]
-            vel[i, 0] += force_x * dt
-            vel[i, 1] += force_y * dt
-        else:
-            # Distance to each edge
-            dist_top    = abs(pos[i, 1] - rect_y)
-            dist_bottom = abs(pos[i, 1] - (rect_y + rect_h))
-            dist_left   = abs(pos[i, 0] - rect_x)
-            dist_right  = abs(pos[i, 0] - (rect_x + rect_w))
-
-            # Find minimum
-            min_dist = min(dist_top, dist_bottom, dist_left, dist_right)
-
-            center_x = (rect_x + rect_w) / 2
-            center_y = (rect_y + rect_h) / 2
-            dx = pos[i, 0] - center_x 
-            dy = pos[i, 1] - center_y
-            if min_dist == dist_top:
-                dist = abs(dy)
-                dx = 0
-            elif min_dist == dist_bottom:
-                dist = abs(dy)
-                dx = 0
-            elif min_dist == dist_left:
-                dist = abs(dx)
-                dy = 0
+            # rect power
+            inside_rect = rect_x <= pos[i, 0] <= rect_x + rect_w and rect_y <= pos[i, 1] <= rect_y + rect_h
+            if inside_rect:
+                force_x = pull_strength[0]
+                force_y = pull_strength[1]
+                vel[i, 0] += force_x * dt
+                vel[i, 1] += force_y * dt
             else:
-                dist = abs(dx)
-                dy = 0
-            if dist > 1e-5:
-                # Normalize vector
-                nx = dx / dist
-                ny = dy / dist
-                # Apply pull proportional to distance
-                force = math.sqrt(pull_strength[0]**2 + pull_strength[1]**2)
-                if nx:
-                    force_x = force * math.exp(- FORCE_DECAY_FACTOR * (dist - FORCE_CIRCLE_SIZE) ** 2)
-                    vel[i, 0] += nx * force_x * dt
-                if ny:
-                    force_y = pull_strength[1] * math.exp(- FORCE_DECAY_FACTOR * (dist - FORCE_CIRCLE_SIZE) ** 2)
-                    vel[i, 1] += ny * force_y * dt
+                # Distance to each edge
+                dist_top    = abs(pos[i, 1] - rect_y)
+                dist_bottom = abs(pos[i, 1] - (rect_y + rect_h))
+                dist_left   = abs(pos[i, 0] - rect_x)
+                dist_right  = abs(pos[i, 0] - (rect_x + rect_w))
+
+                # Find minimum
+                min_dist = min(dist_top, dist_bottom, dist_left, dist_right)
+
+                center_x = (rect_x + rect_w) / 2
+                center_y = (rect_y + rect_h) / 2
+                dx = pos[i, 0] - center_x 
+                dy = pos[i, 1] - center_y
+                if min_dist == dist_top:
+                    dist = abs(dy)
+                    dx = 0
+                elif min_dist == dist_bottom:
+                    dist = abs(dy)
+                    dx = 0
+                elif min_dist == dist_left:
+                    dist = abs(dx)
+                    dy = 0
+                else:
+                    dist = abs(dx)
+                    dy = 0
+                if dist > 1e-5:
+                    # Normalize vector
+                    nx = dx / dist
+                    ny = dy / dist
+                    # Apply pull proportional to distance
+                    force = math.sqrt(pull_strength[0]**2 + pull_strength[1]**2)
+                    if nx:
+                        force_x = force * math.exp(- FORCE_DECAY_FACTOR * (dist - FORCE_CIRCLE_SIZE) ** 2)
+                        vel[i, 0] += nx * force_x * dt
+                    if ny:
+                        force_y = pull_strength[1] * math.exp(- FORCE_DECAY_FACTOR * (dist - FORCE_CIRCLE_SIZE) ** 2)
+                        vel[i, 1] += ny * force_y * dt
 
     # Update position
     pos[i, 0] += vel[i, 0] * dt
@@ -151,15 +153,28 @@ def update(pos, vel, dt, gravity, damping, radius, width, height, target, attrac
 
 def simulation_thread():
     """Run the CUDA simulation in a separate thread"""
-    global positions, velocities, rect_data
+    global positions, velocities, client_rectangles
     blocks = (NUM_PARTICLES + TPB - 1) // TPB
     
     while simulation_running:
         start_time = time.time()
         
+        # Prepare rectangles array for CUDA
+        rect_list = list(client_rectangles.values())
+        if rect_list:
+            # Convert to numpy array for CUDA
+            rects_array = np.array(rect_list, dtype=np.float32)
+            d_rects = cuda.to_device(rects_array)
+            num_rects = len(rect_list)
+        else:
+            # Create empty array if no rectangles
+            rects_array = np.zeros((1, 4), dtype=np.float32)
+            d_rects = cuda.to_device(rects_array)
+            num_rects = 0
+        
         # Run CUDA kernel
         update[blocks, TPB](d_pos, d_vel, DT, GRAVITY, DAMPING, RADIUS, WIDTH, HEIGHT, 
-                           d_target, d_attract, d_rect, RECT_FORCE)
+                           d_target, d_attract, d_rects, num_rects, RECT_FORCE)
         cuda.synchronize()
         
         # Copy data back to host
@@ -169,12 +184,7 @@ def simulation_thread():
         try:
             data_queue.put_nowait({
                 'positions': positions.copy().tolist(),
-                'rect_data': {
-                    'x': float(rect_data[0]),
-                    'y': float(rect_data[1]),
-                    'width': float(rect_data[2]),
-                    'height': float(rect_data[3])
-                },
+                'client_rectangles': client_rectangles.copy(),
                 'timestamp': time.time()
             })
         except queue.Full:
@@ -221,7 +231,7 @@ app.layout = html.Div([
     ], style={'textAlign': 'center', 'marginTop': '20px'}),
     
     # Hidden div to store rectangle position
-    dcc.Store(id='rect-store', data={'x': rect_data[0], 'y': rect_data[1]}),
+    dcc.Store(id='rect-store', data={'x': WIDTH//2 - rect_width//2, 'y': HEIGHT//2 - rect_height//2}),
     
     # Hidden div for mouse events
     html.Div(id='mouse-events', style={'display': 'none'})
@@ -236,7 +246,7 @@ app.layout = html.Div([
     State('rect-store', 'data')
 )
 def update_graph(n_intervals, start_clicks, stop_clicks, reset_clicks, rect_store):
-    global simulation_running, positions, velocities, rect_data
+    global simulation_running, positions, velocities, client_rectangles
     
     # Handle start/stop buttons
     ctx = callback_context
@@ -254,17 +264,11 @@ def update_graph(n_intervals, start_clicks, stop_clicks, reset_clicks, rect_stor
             d_pos.copy_to_device(positions)
             d_vel.copy_to_device(velocities)
     
-    # Update rectangle position if changed
-    if rect_store and (rect_store['x'] != rect_data[0] or rect_store['y'] != rect_data[1]):
-        rect_data[0] = rect_store['x']
-        rect_data[1] = rect_store['y']
-        d_rect.copy_to_device(rect_data)
-    
     # Get latest data from simulation thread
     try:
         data = data_queue.get_nowait()
         positions = data['positions']
-        rect_data = data['rect_data']
+        client_rectangles = data['client_rectangles']
     except queue.Empty:
         # Use last known positions if no new data
         pass
@@ -286,17 +290,18 @@ def update_graph(n_intervals, start_clicks, stop_clicks, reset_clicks, rect_stor
         showlegend=False
     ))
     
-    # Add rectangle
-    fig.add_trace(go.Scatter(
-        x=[rect_data[0], rect_data[0] + rect_data[2], rect_data[0] + rect_data[2], rect_data[0], rect_data[0]],
-        y=[rect_data[1], rect_data[1], rect_data[1] + rect_data[3], rect_data[1] + rect_data[3], rect_data[1]],
-        mode='lines',
-        fill='toself',
-        fillcolor='rgba(0, 0, 0, 0.5)',
-        line=dict(color='black', width=1),
-        name='Force Rectangle',
-        showlegend=False
-    ))
+    # Add all rectangles
+    for client_id, rect_data in client_rectangles.items():
+        fig.add_trace(go.Scatter(
+            x=[rect_data[0], rect_data[0] + rect_data[2], rect_data[0] + rect_data[2], rect_data[0], rect_data[0]],
+            y=[rect_data[1], rect_data[1], rect_data[1] + rect_data[3], rect_data[1] + rect_data[3], rect_data[1]],
+            mode='lines',
+            fill='toself',
+            fillcolor='rgba(0, 0, 0, 0.5)',
+            line=dict(color='black', width=1),
+            name=f'Rectangle {client_id[:8]}',
+            showlegend=False
+        ))
     
     # Update layout
     fig.update_layout(
@@ -331,38 +336,41 @@ def update_graph(n_intervals, start_clicks, stop_clicks, reset_clicks, rect_stor
     State('rect-store', 'data')
 )
 def update_rect_position(click_data, relayout_data, current_rect):
-    global rect_data
+    global client_rectangles
     
     if not current_rect:
-        current_rect = {'x': rect_data[0], 'y': rect_data[1]}
+        current_rect = {'x': WIDTH//2 - rect_width//2, 'y': HEIGHT//2 - rect_height//2}
     
-    # Handle click events
+    # Handle click events - create a default rectangle for Dash users
     if click_data:
         point = click_data['points'][0]
         x, y = point['x'], point['y']
         # Move rectangle to clicked position (center it)
         current_rect['x'] = x - rect_width // 2
         current_rect['y'] = y - rect_height // 2
-    
-    # Handle drag events
-    if relayout_data and 'xaxis.range[0]' in relayout_data:
-        # This is a pan event, not a drag event
-        pass
+        
+        # Update the default rectangle for Dash users
+        if 'dash_default' not in client_rectangles:
+            client_rectangles['dash_default'] = [rect_width, rect_height, rect_width, rect_height]
+        client_rectangles['dash_default'][0] = current_rect['x']
+        client_rectangles['dash_default'][1] = current_rect['y']
     
     return current_rect
 
 # Add Flask route for external updates
 @server.route('/update_rect', methods=['POST'])
 def update_rect():
-    global rect_data
+    global client_rectangles
     data = request.get_json()
-    x = data.get('x', rect_data[0])
-    y = data.get('y', rect_data[1])
+    x = data.get('x', WIDTH//2)
+    y = data.get('y', HEIGHT//2)
+    client_id = data.get('client_id', 'external')
     
-    # Update rectangle position
-    rect_data[0] = x - rect_width // 2
-    rect_data[1] = y - rect_height // 2
-    d_rect.copy_to_device(rect_data)
+    # Update rectangle position for external client
+    if client_id not in client_rectangles:
+        client_rectangles[client_id] = [rect_width, rect_height, rect_width, rect_height]
+    client_rectangles[client_id][0] = x
+    client_rectangles[client_id][1] = y
     
     return jsonify({'status': 'success'})
 
@@ -371,12 +379,17 @@ def update_rect():
 def handle_connect():
     print(f'React client connected: {request.sid}')
     connected_clients.add(request.sid)
-    emit('connected', {'status': 'connected'})
+    # Initialize this client's rectangle
+    client_rectangles[request.sid] = [WIDTH//2 - rect_width//2, HEIGHT//2 - rect_height//2, rect_width, rect_height]
+    emit('connected', {'status': 'connected', 'client_id': request.sid})
 
 @socketio.on('disconnect')
 def handle_disconnect():
     print(f'React client disconnected: {request.sid}')
     connected_clients.discard(request.sid)
+    # Remove this client's rectangle
+    if request.sid in client_rectangles:
+        del client_rectangles[request.sid]
 
 @socketio.on('start_simulation')
 def handle_start_simulation():
@@ -402,10 +415,10 @@ def handle_reset_simulation():
 
 @socketio.on('update_rect')
 def handle_update_rect(data):
-    global rect_data
-    rect_data[0] = data['x']
-    rect_data[1] = data['y']
-    d_rect.copy_to_device(rect_data)
+    global client_rectangles
+    if request.sid in client_rectangles:
+        client_rectangles[request.sid][0] = data['x']
+        client_rectangles[request.sid][1] = data['y']
 
 def broadcast_simulation_data():
     """Broadcast simulation data to all connected React clients"""
