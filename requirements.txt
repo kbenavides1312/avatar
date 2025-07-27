@@ -5,3 +5,4 @@ dash
 plotly
 flask
 flask-socketio
+Pillow==10.0.1

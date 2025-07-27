@@ -109,6 +109,19 @@
   box-shadow: 0 2px 4px rgba(244, 67, 54, 0.3);
 }
 
+.player-indicator {
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  background: rgba(255, 193, 7, 0.9);
+  color: white;
+  box-shadow: 0 2px 4px rgba(255, 193, 7, 0.3);
+  margin-left: 10px;
+}
+
 .canvas-container {
   position: relative;
   margin-bottom: 20px;

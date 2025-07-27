@@ -6,11 +6,13 @@ const ParticleSimulation = () => {
   const canvasRef = useRef(null);
   const [isConnected, setIsConnected] = useState(false);
   const [simulationRunning, setSimulationRunning] = useState(false);
-  const [particles, setParticles] = useState([]);
-  const [clientRectangles, setClientRectangles] = useState({});
+  const [simulationImage, setSimulationImage] = useState(null);
+  const [myRectangle, setMyRectangle] = useState(null);
   const [myClientId, setMyClientId] = useState(null);
+  const [playerNumber, setPlayerNumber] = useState(null);
   const socketRef = useRef(null);
   const animationFrameRef = useRef(null);
+  const imageCacheRef = useRef(null);
 
   // Canvas dimensions
   const WIDTH = 1200;
@@ -34,12 +36,29 @@ const ParticleSimulation = () => {
 
     socketRef.current.on('connected', (data) => {
       setMyClientId(data.client_id);
-      console.log('My client ID:', data.client_id);
+      setPlayerNumber(data.player_number);
+      console.log('Connected as Player', data.player_number);
     });
 
-    socketRef.current.on('simulation_data', (data) => {
-      setParticles(data.positions || []);
-      setClientRectangles(data.client_rectangles || {});
+    socketRef.current.on('error', (data) => {
+      console.error('Server error:', data.message);
+      alert(data.message);
+    });
+
+    socketRef.current.on('simulation_image', (data) => {
+      // Pre-load image for better performance
+      if (data.image) {
+        const img = new Image();
+        img.onload = () => {
+          imageCacheRef.current = img;
+          setSimulationImage(data.image);
+        };
+        img.src = `data:image/png;base64,${data.image}`;
+      }
+      
+      if (data.my_rectangle) {
+        setMyRectangle(data.my_rectangle);
+      }
     });
 
     return () => {
@@ -49,54 +68,75 @@ const ParticleSimulation = () => {
     };
   }, []);
 
-  // Canvas drawing function
+  // Canvas drawing function - optimized for video streaming
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, WIDTH, HEIGHT);
-
-    // Draw particles
-    ctx.fillStyle = 'rgba(0, 100, 255, 0.7)';
-    particles.forEach(particle => {
-      ctx.beginPath();
-      ctx.arc(particle[0], particle[1], 2, 0, 2 * Math.PI);
-      ctx.fill();
-    });
-
-    // Draw all rectangles
-    Object.entries(clientRectangles).forEach(([clientId, rectData]) => {
-      const isMyRectangle = clientId === myClientId;
+    
+    // Draw server-rendered image if available
+    if (imageCacheRef.current) {
+      // Clear and draw new image
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+      ctx.drawImage(imageCacheRef.current, 0, 0, WIDTH, HEIGHT);
       
-      if (isMyRectangle) {
-        // My rectangle - black with 50% transparency
+      // Overlay my rectangle on top
+      if (myRectangle) {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-        ctx.fillRect(rectData[0], rectData[1], rectData[2], rectData[3]);
-      } else {
-        // Other users' rectangles - red with 30% transparency
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
-        ctx.fillRect(rectData[0], rectData[1], rectData[2], rectData[3]);
+        ctx.fillRect(myRectangle[0], myRectangle[1], myRectangle[2], myRectangle[3]);
       }
-    });
+      
+      // Draw connection status
+      ctx.fillStyle = isConnected ? 'green' : 'red';
+      ctx.beginPath();
+      ctx.arc(10, 10, 5, 0, 2 * Math.PI);
+      ctx.fill();
+      
+      ctx.fillStyle = 'black';
+      ctx.font = '12px Arial';
+      ctx.fillText(isConnected ? 'Connected' : 'Disconnected', 25, 20);
+    } else {
+      // Fallback: show loading or disconnected state
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+      ctx.fillStyle = 'lightgray';
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      
+      ctx.fillStyle = 'black';
+      ctx.font = '16px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('Waiting for simulation...', WIDTH/2, HEIGHT/2);
+      
+      // Draw connection status
+      ctx.fillStyle = isConnected ? 'green' : 'red';
+      ctx.beginPath();
+      ctx.arc(10, 10, 5, 0, 2 * Math.PI);
+      ctx.fill();
+      
+      ctx.fillStyle = 'black';
+      ctx.font = '12px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText(isConnected ? 'Connected' : 'Disconnected', 25, 20);
+    }
+  }, [simulationImage, myRectangle, isConnected]);
 
-    // Draw connection status
-    ctx.fillStyle = isConnected ? 'green' : 'red';
-    ctx.fillRect(10, 10, 10, 10);
-    ctx.fillStyle = 'black';
-    ctx.font = '12px Arial';
-    ctx.fillText(isConnected ? 'Connected' : 'Disconnected', 25, 20);
-  }, [particles, clientRectangles, myClientId, isConnected]);
-
-  // Animation loop
+  // Animation loop - optimized for video streaming
   useEffect(() => {
-    const animate = () => {
-      drawCanvas();
+    let lastDrawTime = 0;
+    const targetFPS = 60;
+    const frameInterval = 1000 / targetFPS;
+    
+    const animate = (currentTime) => {
+      // Throttle drawing to target FPS
+      if (currentTime - lastDrawTime >= frameInterval) {
+        drawCanvas();
+        lastDrawTime = currentTime;
+      }
       animationFrameRef.current = requestAnimationFrame(animate);
     };
     
     if (simulationRunning) {
-      animate();
+      animationFrameRef.current = requestAnimationFrame(animate);
     }
 
     return () => {
@@ -109,25 +149,21 @@ const ParticleSimulation = () => {
   // Mouse event handler for clicking to move rectangle
   const handleCanvasClick = useCallback((e) => {
     const canvas = canvasRef.current;
-    if (!canvas || !myClientId) return;
+    if (!canvas || !myRectangle) return;
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    // Get my rectangle data
-    const myRectData = clientRectangles[myClientId];
-    if (!myRectData) return;
-
     // Move my rectangle to clicked position (center it on the click)
-    const newX = Math.max(0, Math.min(WIDTH - myRectData[2], x - myRectData[2] / 2));
-    const newY = Math.max(0, Math.min(HEIGHT - myRectData[3], y - myRectData[3] / 2));
+    const newX = Math.max(0, Math.min(WIDTH - myRectangle[2], x - myRectangle[2] / 2));
+    const newY = Math.max(0, Math.min(HEIGHT - myRectangle[3], y - myRectangle[3] / 2));
 
     // Send new position to server
     if (socketRef.current && isConnected) {
       socketRef.current.emit('update_rect', { x: newX, y: newY });
     }
-  }, [clientRectangles, myClientId, isConnected]);
+  }, [myRectangle, isConnected]);
 
   // Control functions
   const startSimulation = () => {
@@ -153,7 +189,7 @@ const ParticleSimulation = () => {
   return (
     <div className="particle-simulation">
       <div className="simulation-header">
-        <h1>Particle Simulation</h1>
+        <h1>Particle Simulation - 2 Players</h1>
         <div className="controls">
           <button 
             onClick={startSimulation} 
@@ -181,6 +217,11 @@ const ParticleSimulation = () => {
           <span className={`status-indicator ${isConnected ? 'connected' : 'disconnected'}`}>
             {isConnected ? 'Connected' : 'Disconnected'}
           </span>
+          {playerNumber && (
+            <span className="player-indicator">
+              Player {playerNumber}
+            </span>
+          )}
         </div>
       </div>
 
@@ -196,16 +237,16 @@ const ParticleSimulation = () => {
 
       <div className="simulation-info">
         <div className="info-item">
-          <strong>Particles:</strong> {particles.length}
+          <strong>Player:</strong> {playerNumber ? `Player ${playerNumber}` : 'Waiting...'}
         </div>
         <div className="info-item">
           <strong>Status:</strong> {simulationRunning ? 'Running' : 'Stopped'}
         </div>
         <div className="info-item">
-          <strong>Connected Users:</strong> {Object.keys(clientRectangles).length}
+          <strong>Image Status:</strong> {simulationImage ? 'Receiving' : 'Waiting...'}
         </div>
         <div className="info-item">
-          <strong>My Rectangle:</strong> {myClientId ? 'Active' : 'Waiting...'}
+          <strong>My Rectangle:</strong> {myRectangle ? 'Active' : 'Waiting...'}
         </div>
       </div>
     </div>

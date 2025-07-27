@@ -9,6 +9,8 @@ import threading
 import queue
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
+import base64
+from PIL import Image, ImageDraw
 
 # Simulation parameters
 WIDTH, HEIGHT = 1200, 400
@@ -17,7 +19,7 @@ TPB = 32
 DT = 0.05
 GRAVITY = 9.8e2
 DAMPING = 0.1
-RADIUS = 3.0
+RADIUS = 5.0
 PULL_STRENGTH = -30.0e2
 FORCE_CIRCLE_SIZE = 50
 FORCE_DECAY_FACTOR = 1e0
@@ -33,8 +35,11 @@ velocities = np.zeros((NUM_PARTICLES, 2), dtype=np.float32)
 
 circle_center = [0, 0]
 
-# Dictionary to store each client's rectangle data
-client_rectangles = {}
+# Store exactly 2 players' rectangle data
+player1_rectangle = None
+player2_rectangle = None
+player1_id = None
+player2_id = None
 
 # CUDA device arrays
 d_pos = cuda.to_device(positions)
@@ -46,6 +51,41 @@ d_attract = cuda.to_device(np.array([1], dtype=np.float32))  # Start with attrac
 data_queue = queue.Queue(maxsize=10)
 simulation_running = True
 connected_clients = set()
+
+def render_simulation_image(positions):
+    """Render the simulation as an image (particles only) and return as base64 string"""
+    try:
+        # Create a white background image
+        img = Image.new('RGB', (WIDTH, HEIGHT), 'white')
+        draw = ImageDraw.Draw(img)
+        
+        # Draw particles as blue circles
+        particle_count = 0
+        for pos in positions:
+            x, y = int(pos[0]), int(pos[1])
+            if 0 <= x < WIDTH and 0 <= y < HEIGHT:
+                # Draw a small blue circle for each particle
+                draw.ellipse([x-2, y-2, x+2, y+2], fill='blue')
+                particle_count += 1
+        
+        print(f"Rendered {particle_count} particles")
+        
+        # Convert to base64
+        import io
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        print(f"Image encoded, length: {len(img_base64)}")
+        return img_base64
+    except Exception as e:
+        print(f"Error rendering image: {e}")
+        # Return a simple test image
+        img = Image.new('RGB', (WIDTH, HEIGHT), 'red')
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([10, 10, 100, 100], fill='blue')
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 @cuda.jit
 def update(pos, vel, dt, gravity, damping, radius, width, height, target, attract, rects, num_rects, pull_strength):
@@ -153,14 +193,19 @@ def update(pos, vel, dt, gravity, damping, radius, width, height, target, attrac
 
 def simulation_thread():
     """Run the CUDA simulation in a separate thread"""
-    global positions, velocities, client_rectangles
+    global positions, velocities, player1_rectangle, player2_rectangle
     blocks = (NUM_PARTICLES + TPB - 1) // TPB
     
     while simulation_running:
         start_time = time.time()
         
         # Prepare rectangles array for CUDA
-        rect_list = list(client_rectangles.values())
+        rect_list = []
+        if player1_rectangle:
+            rect_list.append(player1_rectangle)
+        if player2_rectangle:
+            rect_list.append(player2_rectangle)
+            
         if rect_list:
             # Convert to numpy array for CUDA
             rects_array = np.array(rect_list, dtype=np.float32)
@@ -184,7 +229,6 @@ def simulation_thread():
         try:
             data_queue.put_nowait({
                 'positions': positions.copy().tolist(),
-                'client_rectangles': client_rectangles.copy(),
                 'timestamp': time.time()
             })
         except queue.Full:
@@ -246,7 +290,7 @@ app.layout = html.Div([
     State('rect-store', 'data')
 )
 def update_graph(n_intervals, start_clicks, stop_clicks, reset_clicks, rect_store):
-    global simulation_running, positions, velocities, client_rectangles
+    global simulation_running, positions, velocities, player1_rectangle, player2_rectangle
     
     # Handle start/stop buttons
     ctx = callback_context
@@ -268,7 +312,6 @@ def update_graph(n_intervals, start_clicks, stop_clicks, reset_clicks, rect_stor
     try:
         data = data_queue.get_nowait()
         positions = data['positions']
-        client_rectangles = data['client_rectangles']
     except queue.Empty:
         # Use last known positions if no new data
         pass
@@ -290,16 +333,28 @@ def update_graph(n_intervals, start_clicks, stop_clicks, reset_clicks, rect_stor
         showlegend=False
     ))
     
-    # Add all rectangles
-    for client_id, rect_data in client_rectangles.items():
+    # Add player rectangles (for Dash admin view)
+    if player1_rectangle:
         fig.add_trace(go.Scatter(
-            x=[rect_data[0], rect_data[0] + rect_data[2], rect_data[0] + rect_data[2], rect_data[0], rect_data[0]],
-            y=[rect_data[1], rect_data[1], rect_data[1] + rect_data[3], rect_data[1] + rect_data[3], rect_data[1]],
+            x=[player1_rectangle[0], player1_rectangle[0] + player1_rectangle[2], player1_rectangle[0] + player1_rectangle[2], player1_rectangle[0], player1_rectangle[0]],
+            y=[player1_rectangle[1], player1_rectangle[1], player1_rectangle[1] + player1_rectangle[3], player1_rectangle[1] + player1_rectangle[3], player1_rectangle[1]],
             mode='lines',
             fill='toself',
-            fillcolor='rgba(0, 0, 0, 0.5)',
-            line=dict(color='black', width=1),
-            name=f'Rectangle {client_id[:8]}',
+            fillcolor='rgba(255, 0, 0, 0.5)',
+            line=dict(color='red', width=1),
+            name='Player 1',
+            showlegend=False
+        ))
+    
+    if player2_rectangle:
+        fig.add_trace(go.Scatter(
+            x=[player2_rectangle[0], player2_rectangle[0] + player2_rectangle[2], player2_rectangle[0] + player2_rectangle[2], player2_rectangle[0], player2_rectangle[0]],
+            y=[player2_rectangle[1], player2_rectangle[1], player2_rectangle[1] + player2_rectangle[3], player2_rectangle[1] + player2_rectangle[3], player2_rectangle[1]],
+            mode='lines',
+            fill='toself',
+            fillcolor='rgba(0, 0, 255, 0.5)',
+            line=dict(color='blue', width=1),
+            name='Player 2',
             showlegend=False
         ))
     
@@ -377,19 +432,44 @@ def update_rect():
 # SocketIO event handlers for React app
 @socketio.on('connect')
 def handle_connect():
+    global player1_id, player2_id, player1_rectangle, player2_rectangle
     print(f'React client connected: {request.sid}')
     connected_clients.add(request.sid)
-    # Initialize this client's rectangle
-    client_rectangles[request.sid] = [WIDTH//2 - rect_width//2, HEIGHT//2 - rect_height//2, rect_width, rect_height]
-    emit('connected', {'status': 'connected', 'client_id': request.sid})
+    
+    # Assign player slot
+    if player1_id is None:
+        player1_id = request.sid
+        player1_rectangle = [WIDTH//4 - rect_width//2, HEIGHT//2 - rect_height//2, rect_width, rect_height]
+        player_number = 1
+    elif player2_id is None:
+        player2_id = request.sid
+        player2_rectangle = [3*WIDTH//4 - rect_width//2, HEIGHT//2 - rect_height//2, rect_width, rect_height]
+        player_number = 2
+    else:
+        # Max players reached
+        emit('error', {'message': 'Maximum players reached (2)'})
+        return
+    
+    emit('connected', {
+        'status': 'connected', 
+        'client_id': request.sid,
+        'player_number': player_number,
+        'max_players': 2
+    })
 
 @socketio.on('disconnect')
 def handle_disconnect():
+    global player1_id, player2_id, player1_rectangle, player2_rectangle
     print(f'React client disconnected: {request.sid}')
     connected_clients.discard(request.sid)
+    
     # Remove this client's rectangle
-    if request.sid in client_rectangles:
-        del client_rectangles[request.sid]
+    if request.sid == player1_id:
+        player1_id = None
+        player1_rectangle = None
+    elif request.sid == player2_id:
+        player2_id = None
+        player2_rectangle = None
 
 @socketio.on('start_simulation')
 def handle_start_simulation():
@@ -415,22 +495,43 @@ def handle_reset_simulation():
 
 @socketio.on('update_rect')
 def handle_update_rect(data):
-    global client_rectangles
-    if request.sid in client_rectangles:
-        client_rectangles[request.sid][0] = data['x']
-        client_rectangles[request.sid][1] = data['y']
+    global player1_rectangle, player2_rectangle
+    if request.sid == player1_id and player1_rectangle:
+        player1_rectangle[0] = data['x']
+        player1_rectangle[1] = data['y']
+    elif request.sid == player2_id and player2_rectangle:
+        player2_rectangle[0] = data['x']
+        player2_rectangle[1] = data['y']
 
 def broadcast_simulation_data():
-    """Broadcast simulation data to all connected React clients"""
+    """Broadcast simulation image to all connected React clients"""
     while True:
         try:
             data = data_queue.get(timeout=1)
             if connected_clients:
-                socketio.emit('simulation_data', data, room=None)
+                # Render the simulation as an image (particles only)
+                image_base64 = render_simulation_image(data['positions'])
+                
+                # Send personalized data to each client
+                for client_id in connected_clients:
+                    personalized_data = {
+                        'image': image_base64,
+                        'timestamp': data['timestamp']
+                    }
+                    
+                    # Add this client's rectangle data
+                    if client_id == player1_id and player1_rectangle:
+                        personalized_data['my_rectangle'] = player1_rectangle
+                    elif client_id == player2_id and player2_rectangle:
+                        personalized_data['my_rectangle'] = player2_rectangle
+                    
+                    socketio.emit('simulation_image', personalized_data, room=client_id)
         except queue.Empty:
             continue
         except Exception as e:
             print(f"Error broadcasting data: {e}")
+            import traceback
+            traceback.print_exc()
 
 # Start simulation and broadcast threads
 sim_thread = threading.Thread(target=simulation_thread, daemon=True)
