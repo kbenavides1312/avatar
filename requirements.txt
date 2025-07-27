@@ -1,3 +1,7 @@
 numba
 numpy
 matplotlib
+dash
+plotly
+flask
+flask-socketio

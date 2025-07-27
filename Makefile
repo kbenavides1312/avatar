@@ -8,7 +8,7 @@ run-test:
 	python3 test.py
 
 serve:
-	venv/bin/python src/server.py
+	venv/bin/python server/server.py
 
 build:
 	docker build -t api .
