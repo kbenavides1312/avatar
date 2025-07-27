@@ -35,9 +35,9 @@ velocities = np.zeros((NUM_PARTICLES, 2), dtype=np.float32)
 
 circle_center = [0, 0]
 
-# Store exactly 2 players' rectangle data
-player1_rectangle = None
-player2_rectangle = None
+# Store exactly 2 players' force maps
+player1_force_map = None
+player2_force_map = None
 player1_id = None
 player2_id = None
 
@@ -52,8 +52,76 @@ data_queue = queue.Queue(maxsize=10)
 simulation_running = True
 connected_clients = set()
 
+def process_canvas_forces(image):
+    """Process canvas image to create a force map based on pixel colors"""
+    try:
+        # Convert to numpy array for analysis
+        import numpy as np
+        img_array = np.array(image)
+        
+        # Convert to grayscale for simpler processing
+        if len(img_array.shape) == 3:
+            # RGB to grayscale conversion
+            gray_array = np.mean(img_array, axis=2).astype(np.uint8)
+        else:
+            gray_array = img_array
+        
+        # Save debug image
+        Image.fromarray(gray_array).save('gray_array.png')
+        
+        # Create force map: 0 for white (no force), 1 for black (apply force)
+        # Assuming white background (255) and black drawing (0)
+        # Threshold at 128 - anything darker than 128 becomes a force pixel
+        force_map = (gray_array < 128).astype(np.float32)
+        
+        # Save debug force map
+        debug_force = (force_map * 255).astype(np.uint8)
+        Image.fromarray(debug_force).save('force_map_debug.png')
+        
+        print(f"Force map created: {np.sum(force_map)} force pixels out of {force_map.size} total pixels")
+        return force_map
+        
+    except Exception as e:
+        print(f"Error processing canvas for forces: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def render_force_map_debug():
+    """Render force maps as a debug image for visualization"""
+    try:
+        # Create a white background
+        img = Image.new('RGB', (WIDTH, HEIGHT), 'white')
+        img_array = np.array(img)
+        
+        # Add Player 1 force map (bright red)
+        if player1_force_map is not None:
+            red_overlay = np.zeros_like(img_array)
+            red_overlay[:, :, 0] = (player1_force_map).astype(np.uint8)
+            red_overlay[:, :, 1] = 0
+            red_overlay[:, :, 2] = 0
+            img_array = np.clip(img_array + red_overlay, 0, 255)
+        
+        # Add Player 2 force map (darker red)
+        if player2_force_map is not None:
+            red_overlay2 = np.zeros_like(img_array)
+            red_overlay2[:, :, 0] = (player2_force_map).astype(np.uint8)
+            red_overlay2[:, :, 1] = 0
+            red_overlay2[:, :, 2] = 0
+            img_array = np.clip(img_array + red_overlay2, 0, 255)
+        
+        # Convert back to PIL Image
+        debug_img = Image.fromarray(img_array)
+        
+        # Save debug image
+        debug_img.save('force_map_debug.png')
+        print("Force map debug image saved as 'force_map_debug.png'")
+        
+    except Exception as e:
+        print(f"Error creating force map debug image: {e}")
+
 def render_simulation_image(positions):
-    """Render the simulation as an image (particles only) and return as base64 string"""
+    """Render the simulation as an image with force maps as red overlay"""
     try:
         # Create a white background image
         img = Image.new('RGB', (WIDTH, HEIGHT), 'white')
@@ -70,15 +138,53 @@ def render_simulation_image(positions):
         
         print(f"Rendered {particle_count} particles")
         
+        # Convert to numpy array for force map overlay
+        import numpy as np
+        img_array = np.array(img)
+        
+        # Add force maps as red overlay
+        if player1_force_map is not None:
+            # Player 1 force map as red overlay (semi-transparent)
+            red_overlay = np.zeros_like(img_array)
+            red_overlay[:, :, 0] = (player1_force_map * 255).astype(np.uint8)  # Red channel
+            red_overlay[:, :, 1] = 0  # Green channel
+            red_overlay[:, :, 2] = 0  # Blue channel
+            
+            # Blend with original image (50% opacity)
+            img_array = np.clip(img_array + (red_overlay * 0.5).astype(np.uint8), 0, 255)
+            
+            # Debug info
+            force_pixels = np.sum(player1_force_map)
+            print(f"Player 1 force map: {force_pixels} force pixels ({force_pixels/(WIDTH*HEIGHT)*100:.2f}% of canvas)")
+        
+        if player2_force_map is not None:
+            # Player 2 force map as darker red overlay
+            red_overlay2 = np.zeros_like(img_array)
+            red_overlay2[:, :, 0] = (player2_force_map * 200).astype(np.uint8)  # Darker red
+            red_overlay2[:, :, 1] = 0
+            red_overlay2[:, :, 2] = 0
+            
+            # Blend with current image (30% opacity)
+            img_array = np.clip(img_array + (red_overlay2 * 0.3).astype(np.uint8), 0, 255)
+            
+            # Debug info
+            force_pixels = np.sum(player2_force_map)
+            print(f"Player 2 force map: {force_pixels} force pixels ({force_pixels/(WIDTH*HEIGHT)*100:.2f}% of canvas)")
+        
+        # Convert back to PIL Image
+        img_with_forces = Image.fromarray(img_array)
+        
         # Convert to base64
         import io
         buffer = io.BytesIO()
-        img.save(buffer, format='PNG')
+        img_with_forces.save(buffer, format='PNG')
         img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        print(f"Image encoded, length: {len(img_base64)}")
+        print(f"Image encoded with force maps, length: {len(img_base64)}")
         return img_base64
     except Exception as e:
         print(f"Error rendering image: {e}")
+        import traceback
+        traceback.print_exc()
         # Return a simple test image
         img = Image.new('RGB', (WIDTH, HEIGHT), 'red')
         draw = ImageDraw.Draw(img)
@@ -88,7 +194,7 @@ def render_simulation_image(positions):
         return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 @cuda.jit
-def update(pos, vel, dt, gravity, damping, radius, width, height, target, attract, rects, num_rects, pull_strength):
+def update(pos, vel, dt, gravity, damping, radius, width, height, target, attract, force_map1, force_map2, pull_strength):
     i = cuda.grid(1)
     if i >= pos.shape[0]:
         return
@@ -96,59 +202,23 @@ def update(pos, vel, dt, gravity, damping, radius, width, height, target, attrac
     # Gravity pulls down (y increases downward)
     vel[i, 1] += gravity * dt
 
-    # If attract flag set, apply pulling force towards all rectangles
+    # If attract flag set, apply pulling force based on force maps
     if attract[0] == 1:
-        for rect_idx in range(num_rects):
-            rect_x = rects[rect_idx, 0]
-            rect_y = rects[rect_idx, 1]
-            rect_w = rects[rect_idx, 2]
-            rect_h = rects[rect_idx, 3]
-
-            # rect power
-            inside_rect = rect_x <= pos[i, 0] <= rect_x + rect_w and rect_y <= pos[i, 1] <= rect_y + rect_h
-            if inside_rect:
-                force_x = pull_strength[0]
-                force_y = pull_strength[1]
-                vel[i, 0] += force_x * dt
-                vel[i, 1] += force_y * dt
-            else:
-                # Distance to each edge
-                dist_top    = abs(pos[i, 1] - rect_y)
-                dist_bottom = abs(pos[i, 1] - (rect_y + rect_h))
-                dist_left   = abs(pos[i, 0] - rect_x)
-                dist_right  = abs(pos[i, 0] - (rect_x + rect_w))
-
-                # Find minimum
-                min_dist = min(dist_top, dist_bottom, dist_left, dist_right)
-
-                center_x = (rect_x + rect_w) / 2
-                center_y = (rect_y + rect_h) / 2
-                dx = pos[i, 0] - center_x 
-                dy = pos[i, 1] - center_y
-                if min_dist == dist_top:
-                    dist = abs(dy)
-                    dx = 0
-                elif min_dist == dist_bottom:
-                    dist = abs(dy)
-                    dx = 0
-                elif min_dist == dist_left:
-                    dist = abs(dx)
-                    dy = 0
-                else:
-                    dist = abs(dx)
-                    dy = 0
-                if dist > 1e-5:
-                    # Normalize vector
-                    nx = dx / dist
-                    ny = dy / dist
-                    # Apply pull proportional to distance
-                    force = math.sqrt(pull_strength[0]**2 + pull_strength[1]**2)
-                    if nx:
-                        force_x = force * math.exp(- FORCE_DECAY_FACTOR * (dist - FORCE_CIRCLE_SIZE) ** 2)
-                        vel[i, 0] += nx * force_x * dt
-                    if ny:
-                        force_y = pull_strength[1] * math.exp(- FORCE_DECAY_FACTOR * (dist - FORCE_CIRCLE_SIZE) ** 2)
-                        vel[i, 1] += ny * force_y * dt
+        # Get particle position as pixel coordinates
+        pixel_x = int(pos[i, 0])
+        pixel_y = int(pos[i, 1])
+        
+        # Check bounds
+        if 0 <= pixel_x < width and 0 <= pixel_y < height:
+            # Check force map 1 (player 1) - if pixel is black, apply force
+            if force_map1[pixel_y, pixel_x] > 0:
+                vel[i, 0] += pull_strength[0] * dt
+                vel[i, 1] += pull_strength[1] * dt
+            
+            # Check force map 2 (player 2) - if pixel is black, apply force
+            if force_map2[pixel_y, pixel_x] > 0:
+                vel[i, 0] += pull_strength[0] * dt
+                vel[i, 1] += pull_strength[1] * dt
 
     # Update position
     pos[i, 0] += vel[i, 0] * dt
@@ -193,33 +263,31 @@ def update(pos, vel, dt, gravity, damping, radius, width, height, target, attrac
 
 def simulation_thread():
     """Run the CUDA simulation in a separate thread"""
-    global positions, velocities, player1_rectangle, player2_rectangle
+    global positions, velocities, player1_force_map, player2_force_map
     blocks = (NUM_PARTICLES + TPB - 1) // TPB
+    
+    # Initialize empty force maps
+    if player1_force_map is None:
+        player1_force_map = np.zeros((HEIGHT, WIDTH), dtype=np.float32)
+    if player2_force_map is None:
+        player2_force_map = np.zeros((HEIGHT, WIDTH), dtype=np.float32)
+    
+    # Create CUDA device arrays for force maps
+    d_force_map1 = cuda.to_device(player1_force_map)
+    d_force_map2 = cuda.to_device(player2_force_map)
     
     while simulation_running:
         start_time = time.time()
         
-        # Prepare rectangles array for CUDA
-        rect_list = []
-        if player1_rectangle:
-            rect_list.append(player1_rectangle)
-        if player2_rectangle:
-            rect_list.append(player2_rectangle)
-            
-        if rect_list:
-            # Convert to numpy array for CUDA
-            rects_array = np.array(rect_list, dtype=np.float32)
-            d_rects = cuda.to_device(rects_array)
-            num_rects = len(rect_list)
-        else:
-            # Create empty array if no rectangles
-            rects_array = np.zeros((1, 4), dtype=np.float32)
-            d_rects = cuda.to_device(rects_array)
-            num_rects = 0
+        # Update force maps if they've changed
+        if player1_force_map is not None:
+            d_force_map1 = cuda.to_device(player1_force_map)
+        if player2_force_map is not None:
+            d_force_map2 = cuda.to_device(player2_force_map)
         
-        # Run CUDA kernel
+        # Run CUDA kernel with force maps
         update[blocks, TPB](d_pos, d_vel, DT, GRAVITY, DAMPING, RADIUS, WIDTH, HEIGHT, 
-                           d_target, d_attract, d_rects, num_rects, RECT_FORCE)
+                           d_target, d_attract, d_force_map1, d_force_map2, RECT_FORCE)
         cuda.synchronize()
         
         # Copy data back to host
@@ -429,21 +497,32 @@ def update_rect():
     
     return jsonify({'status': 'success'})
 
+# Add Flask route for force map debug
+@server.route('/debug_force_map', methods=['GET'])
+def debug_force_map():
+    render_force_map_debug()
+    return jsonify({
+        'status': 'success',
+        'player1_force_pixels': int(np.sum(player1_force_map)) if player1_force_map is not None else 0,
+        'player2_force_pixels': int(np.sum(player2_force_map)) if player2_force_map is not None else 0,
+        'total_pixels': WIDTH * HEIGHT
+    })
+
 # SocketIO event handlers for React app
 @socketio.on('connect')
 def handle_connect():
-    global player1_id, player2_id, player1_rectangle, player2_rectangle
+    global player1_id, player2_id, player1_force_map, player2_force_map
     print(f'React client connected: {request.sid}')
     connected_clients.add(request.sid)
     
     # Assign player slot
     if player1_id is None:
         player1_id = request.sid
-        player1_rectangle = [WIDTH//4 - rect_width//2, HEIGHT//2 - rect_height//2, rect_width, rect_height]
+        player1_force_map = np.zeros((HEIGHT, WIDTH), dtype=np.float32)
         player_number = 1
     elif player2_id is None:
         player2_id = request.sid
-        player2_rectangle = [3*WIDTH//4 - rect_width//2, HEIGHT//2 - rect_height//2, rect_width, rect_height]
+        player2_force_map = np.zeros((HEIGHT, WIDTH), dtype=np.float32)
         player_number = 2
     else:
         # Max players reached
@@ -459,17 +538,17 @@ def handle_connect():
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    global player1_id, player2_id, player1_rectangle, player2_rectangle
+    global player1_id, player2_id, player1_force_map, player2_force_map
     print(f'React client disconnected: {request.sid}')
     connected_clients.discard(request.sid)
     
-    # Remove this client's rectangle
+    # Remove this client's force map
     if request.sid == player1_id:
         player1_id = None
-        player1_rectangle = None
+        player1_force_map = np.zeros((HEIGHT, WIDTH), dtype=np.float32)
     elif request.sid == player2_id:
         player2_id = None
-        player2_rectangle = None
+        player2_force_map = np.zeros((HEIGHT, WIDTH), dtype=np.float32)
 
 @socketio.on('start_simulation')
 def handle_start_simulation():
@@ -493,15 +572,59 @@ def handle_reset_simulation():
     d_vel.copy_to_device(velocities)
     emit('simulation_reset', {'status': 'reset'})
 
-@socketio.on('update_rect')
-def handle_update_rect(data):
-    global player1_rectangle, player2_rectangle
-    if request.sid == player1_id and player1_rectangle:
-        player1_rectangle[0] = data['x']
-        player1_rectangle[1] = data['y']
-    elif request.sid == player2_id and player2_rectangle:
-        player2_rectangle[0] = data['x']
-        player2_rectangle[1] = data['y']
+@socketio.on('update_canvas')
+def handle_update_canvas(data):
+    global player1_force_map, player2_force_map
+    print(f"Received canvas data from {request.sid}")
+    print(f"Data keys: {list(data.keys())}")
+    print(f"Canvas data length: {len(data.get('canvas_data', ''))}")
+    
+    try:
+        # Extract canvas data
+        canvas_data = data.get('canvas_data')
+        if not canvas_data:
+            print("No canvas data received")
+            return
+        
+        # Remove the data URL prefix to get just the base64 data
+        if canvas_data.startswith('data:image/png;base64,'):
+            canvas_data = canvas_data.split(',')[1]
+        
+        # Decode base64 image
+        import io
+        image_bytes = base64.b64decode(canvas_data)
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Save received image for debugging
+        image.save('canvas_data.png')
+        print(f"Saved received canvas as 'canvas_data.png'")
+        
+        # Process canvas to create force map
+        force_map = process_canvas_forces(image)
+        
+        if force_map is not None:
+            # Update the appropriate player's force map
+            if request.sid == player1_id:
+                player1_force_map = force_map
+                print(f"Updated Player 1 force map: {np.sum(force_map)} force pixels")
+            elif request.sid == player2_id:
+                player2_force_map = force_map
+                print(f"Updated Player 2 force map: {np.sum(force_map)} force pixels")
+            else:
+                print(f"Unknown client ID: {request.sid}")
+        else:
+            print("Failed to process canvas for force map")
+            
+    except Exception as e:
+        print(f"Error processing canvas data: {e}")
+        import traceback
+        traceback.print_exc()
+
+# Note: Old rectangle handler removed - now using force maps based on canvas pixels
 
 def broadcast_simulation_data():
     """Broadcast simulation image to all connected React clients"""
@@ -512,18 +635,12 @@ def broadcast_simulation_data():
                 # Render the simulation as an image (particles only)
                 image_base64 = render_simulation_image(data['positions'])
                 
-                # Send personalized data to each client
+                # Send data to each client
                 for client_id in connected_clients:
                     personalized_data = {
                         'image': image_base64,
                         'timestamp': data['timestamp']
                     }
-                    
-                    # Add this client's rectangle data
-                    if client_id == player1_id and player1_rectangle:
-                        personalized_data['my_rectangle'] = player1_rectangle
-                    elif client_id == player2_id and player2_rectangle:
-                        personalized_data['my_rectangle'] = player2_rectangle
                     
                     socketio.emit('simulation_image', personalized_data, room=client_id)
         except queue.Empty:
