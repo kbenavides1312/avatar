@@ -132,8 +132,16 @@ const ParticleSimulation = () => {
       if (data.image) {
         const img = new Image();
         img.onload = () => {
+          // Clean up old image to prevent memory leak
+          if (imageCacheRef.current) {
+            imageCacheRef.current.onload = null;
+            imageCacheRef.current.onerror = null;
+          }
           imageCacheRef.current = img;
           setSimulationImage(data.image);
+        };
+        img.onerror = () => {
+          console.error('Failed to load simulation image');
         };
         img.src = `data:image/png;base64,${data.image}`;
       }
@@ -146,6 +154,12 @@ const ParticleSimulation = () => {
     return () => {
       if (socketRef.current) {
         socketRef.current.disconnect();
+      }
+      // Clean up image cache to prevent memory leak
+      if (imageCacheRef.current) {
+        imageCacheRef.current.onload = null;
+        imageCacheRef.current.onerror = null;
+        imageCacheRef.current = null;
       }
     };
   }, []);
@@ -226,6 +240,7 @@ const ParticleSimulation = () => {
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
       }
     };
   }, [drawCanvas, simulationRunning, sendCanvasToServer]);
