@@ -12,7 +12,7 @@ from flask_socketio import SocketIO, emit
 
 # Simulation parameters
 WIDTH, HEIGHT = 1200, 400
-NUM_PARTICLES = 10000  # Reduced for web performance
+NUM_PARTICLES = 3000  # Reduced for web performance
 TPB = 32
 DT = 0.05
 GRAVITY = 9.8e2
