@@ -12,7 +12,7 @@ from flask_socketio import SocketIO, emit
 
 # Simulation parameters
 WIDTH, HEIGHT = 1200, 400
-NUM_PARTICLES = 3000  # Reduced for web performance
+NUM_PARTICLES = 10000  # Reduced for web performance
 TPB = 32
 DT = 0.05
 GRAVITY = 9.8e2
@@ -287,14 +287,13 @@ def update_graph(n_intervals, start_clicks, stop_clicks, reset_clicks, rect_stor
     ))
     
     # Add rectangle
-    rect_x = [rect_data[0], rect_data[0] + rect_data[2], rect_data[0] + rect_data[2], rect_data[0], rect_data[0]]
-    rect_y = [rect_data[1], rect_data[1], rect_data[1] + rect_data[3], rect_data[1] + rect_data[3], rect_data[1]]
-    
     fig.add_trace(go.Scatter(
-        x=rect_x,
-        y=rect_y,
+        x=[rect_data[0], rect_data[0] + rect_data[2], rect_data[0] + rect_data[2], rect_data[0], rect_data[0]],
+        y=[rect_data[1], rect_data[1], rect_data[1] + rect_data[3], rect_data[1] + rect_data[3], rect_data[1]],
         mode='lines',
-        line=dict(color='green', width=3),
+        fill='toself',
+        fillcolor='rgba(0, 0, 0, 0.5)',
+        line=dict(color='black', width=1),
         name='Force Rectangle',
         showlegend=False
     ))

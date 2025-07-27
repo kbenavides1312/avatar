@@ -8,8 +8,6 @@ const ParticleSimulation = () => {
   const [simulationRunning, setSimulationRunning] = useState(false);
   const [particles, setParticles] = useState([]);
   const [rectData, setRectData] = useState({ x: 600, y: 200, width: 20, height: 80 });
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const socketRef = useRef(null);
   const animationFrameRef = useRef(null);
 
@@ -62,9 +60,8 @@ const ParticleSimulation = () => {
     });
 
     // Draw rectangle
-    ctx.strokeStyle = 'green';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(rectData.x, rectData.y, rectData.width, rectData.height);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)'; // Black with 50% transparency
+    ctx.fillRect(rectData.x, rectData.y, rectData.width, rectData.height);
 
     // Draw connection status
     ctx.fillStyle = isConnected ? 'green' : 'red';
@@ -92,8 +89,8 @@ const ParticleSimulation = () => {
     };
   }, [drawCanvas, simulationRunning]);
 
-  // Mouse event handlers
-  const handleMouseDown = useCallback((e) => {
+  // Mouse event handler for clicking to move rectangle
+  const handleCanvasClick = useCallback((e) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -101,29 +98,9 @@ const ParticleSimulation = () => {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    // Check if click is inside rectangle
-    if (x >= rectData.x && x <= rectData.x + rectData.width &&
-        y >= rectData.y && y <= rectData.y + rectData.height) {
-      setIsDragging(true);
-      setDragOffset({
-        x: x - rectData.x,
-        y: y - rectData.y
-      });
-    }
-  }, [rectData]);
-
-  const handleMouseMove = useCallback((e) => {
-    if (!isDragging) return;
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    const newX = Math.max(0, Math.min(WIDTH - rectData.width, x - dragOffset.x));
-    const newY = Math.max(0, Math.min(HEIGHT - rectData.height, y - dragOffset.y));
+    // Move rectangle to clicked position (center it on the click)
+    const newX = Math.max(0, Math.min(WIDTH - rectData.width, x - rectData.width / 2));
+    const newY = Math.max(0, Math.min(HEIGHT - rectData.height, y - rectData.height / 2));
 
     const newRectData = { ...rectData, x: newX, y: newY };
     setRectData(newRectData);
@@ -132,11 +109,7 @@ const ParticleSimulation = () => {
     if (socketRef.current && isConnected) {
       socketRef.current.emit('update_rect', newRectData);
     }
-  }, [isDragging, dragOffset, rectData, isConnected]);
-
-  const handleMouseUp = useCallback(() => {
-    setIsDragging(false);
-  }, []);
+  }, [rectData, isConnected]);
 
   // Control functions
   const startSimulation = () => {
@@ -198,16 +171,9 @@ const ParticleSimulation = () => {
           ref={canvasRef}
           width={WIDTH}
           height={HEIGHT}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
+          onClick={handleCanvasClick}
           className="simulation-canvas"
         />
-        <div className="instructions">
-          <p>Click and drag the green rectangle to move it</p>
-          <p>Particles will be attracted to the rectangle</p>
-        </div>
       </div>
 
       <div className="simulation-info">
